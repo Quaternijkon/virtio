@@ -42,6 +42,7 @@ const SUPPORTED_FEATURES: BlkFeature = BlkFeature::RO
 /// # }
 /// ```
 pub struct VirtIOBlk<H: Hal, T: Transport> {
+    //Hal是硬件抽象层，Transport是传输层
     transport: T,
     queue: VirtQueue<H, { QUEUE_SIZE as usize }>,
     capacity: u64,
