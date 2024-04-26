@@ -16,7 +16,7 @@ impl<T: Copy> ReadOnly<T> {
 pub struct WriteOnly<T: Copy>(T);
 
 /// An MMIO register which may be both read and written.
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 #[repr(transparent)]
 pub struct Volatile<T: Copy>(T);
 
