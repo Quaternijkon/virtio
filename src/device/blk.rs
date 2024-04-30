@@ -11,10 +11,18 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 const QUEUE: u16 = 0;
 const QUEUE_SIZE: u16 = 16;
-const SUPPORTED_FEATURES: BlkFeature = BlkFeature::RO
-    .union(BlkFeature::FLUSH)
-    .union(BlkFeature::RING_INDIRECT_DESC)
-    .union(BlkFeature::RING_EVENT_IDX);
+const SUPPORTED_FEATURES: BlkFeature = BlkFeature::RO //支持只读
+    .union(BlkFeature::FLUSH) //支持缓存刷新命令
+    .union(BlkFeature::RING_INDIRECT_DESC) //支持间接描述符
+    .union(BlkFeature::RING_EVENT_IDX) //支持事件索引
+    .union(BlkFeature::BLK_SIZE) //支持设置块大小
+    .union(BlkFeature::CONFIG_WCE) //支持writeback和writethrough模式
+    .union(BlkFeature::TOPOLOGY) //支持提供最佳I/O对齐信息
+    .union(BlkFeature::DISCARD) //支持丢弃命令
+    .union(BlkFeature::WRITE_ZEROES) //支持写零值数据命令
+    .union(BlkFeature::MQ) //支持多队列
+    .union(BlkFeature::SECURE_ERASE) //支持安全擦除命令
+    .union(BlkFeature::ZONED); //支持分区存储设备
 
 /// VirtIO 块设备的驱动程序
 ///
@@ -46,6 +54,16 @@ pub struct VirtIOBlk<H: Hal, T: Transport> {
     transport: T,
     queue: VirtQueue<H, { QUEUE_SIZE as usize }>,
     capacity: u64,
+    blk_size: u32,
+    opt_io_size: u32,
+    max_discard_sectors: u32,
+    max_discard_seg: u32,
+    max_write_zeroes_sectors: u32,
+    max_write_zeroes_seg: u32,
+    max_secure_erase_sectors: u32,
+    max_secure_erase_seg: u32,
+    writeback: u8,
+    num_queues: u16,
     negotiated_features: BlkFeature,
 }
 
@@ -63,6 +81,69 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
         };
         info!("found a block device of size {}KB", capacity / 2);
 
+        let mut blk_size: u32 = 512;
+        if negotiated_features.contains(BlkFeature::BLK_SIZE) {
+            blk_size = unsafe { volread!(config, blk_size) };
+            info!("blk_size: {}", blk_size);
+        }
+
+        let writeback = if negotiated_features.contains(BlkFeature::CONFIG_WCE) {
+            unsafe { volread!(config, writeback) }
+        } else {
+            0
+        };
+
+        let opt_io_size = if negotiated_features.contains(BlkFeature::TOPOLOGY) {
+            unsafe {
+                let topology = volread!(config, topology);
+                topology.opt_io_size
+            }
+        } else {
+            8
+        };
+
+        let max_discard_sectors = if negotiated_features.contains(BlkFeature::DISCARD) {
+            unsafe { volread!(config, max_discard_sectors) }
+        } else {
+            512
+        };
+
+        let max_discard_seg = if negotiated_features.contains(BlkFeature::DISCARD) {
+            unsafe { volread!(config, max_discard_seg) }
+        } else {
+            32
+        };
+
+        let max_write_zeroes_sectors = if negotiated_features.contains(BlkFeature::WRITE_ZEROES) {
+            unsafe { volread!(config, max_write_zeroes_sectors) }
+        } else {
+            512
+        };
+
+        let max_write_zeroes_seg = if negotiated_features.contains(BlkFeature::WRITE_ZEROES) {
+            unsafe { volread!(config, max_write_zeroes_seg) }
+        } else {
+            32
+        };
+
+        let max_secure_erase_sectors = if negotiated_features.contains(BlkFeature::SECURE_ERASE) {
+            unsafe { volread!(config, max_secure_erase_sectors) }
+        } else {
+            512
+        };
+
+        let max_secure_erase_seg = if negotiated_features.contains(BlkFeature::SECURE_ERASE) {
+            unsafe { volread!(config, max_secure_erase_seg) }
+        } else {
+            32
+        };
+
+        let num_queues = if negotiated_features.contains(BlkFeature::MQ) {
+            unsafe { volread!(config, num_queues) }
+        } else {
+            1
+        };
+
         let queue = VirtQueue::new(
             &mut transport,
             QUEUE,
@@ -75,6 +156,16 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
             transport,
             queue,
             capacity,
+            blk_size,
+            opt_io_size,
+            max_discard_sectors,
+            max_discard_seg,
+            max_write_zeroes_sectors,
+            max_write_zeroes_seg,
+            max_secure_erase_sectors,
+            max_secure_erase_seg,
+            writeback,
+            num_queues,
             negotiated_features,
         })
     }
@@ -139,6 +230,7 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
                 ..Default::default()
             })
         } else {
+            info!("device does not support flush");
             Ok(())
         }
     }
@@ -172,8 +264,8 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
                 type_: ReqType::In,
                 reserved: 0,
                 sector: block_id as u64,
-                data: [0; 16],
-                status: StatusType::OK,
+                // data: [0; 16],
+                // status: StatusType::OK,
             },
             buf,
         )
@@ -243,8 +335,8 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
             type_: ReqType::In,
             reserved: 0,
             sector: block_id as u64,
-            data: [0; 16],
-            status: StatusType::OK,
+            // data: [0; 16],
+            // status: StatusType::OK,
         };
         let token = self
             .queue
@@ -280,14 +372,19 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
     pub fn write_blocks(&mut self, block_id: usize, buf: &[u8]) -> Result {
         assert_ne!(buf.len(), 0);
         assert_eq!(buf.len() % SECTOR_SIZE, 0);
-        self.request_write(
-            BlkReq {
-                type_: ReqType::Out,
-                sector: block_id as u64,
-                ..Default::default()
-            },
-            buf,
-        )
+        if self.negotiated_features.contains(BlkFeature::RO) {
+            info!("device is read-only");
+            Ok(())
+        } else {
+            self.request_write(
+                BlkReq {
+                    type_: ReqType::Out,
+                    sector: block_id as u64,
+                    ..Default::default()
+                },
+                buf,
+            )
+        }
     }
 
     /// 提交一个请求来写入一个或多个块，但立即返回而不等待写入完成。
@@ -320,8 +417,8 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
             type_: ReqType::Out,
             reserved: 0,
             sector: block_id as u64,
-            data: [0; 16],
-            status: StatusType::OK,
+            // data: [0; 16],
+            // status: StatusType::OK,
         };
         let token = self
             .queue
@@ -434,8 +531,8 @@ pub struct BlkReq {
     type_: ReqType,
     reserved: u32,
     sector: u64,
-    status: StatusType,
-    data: [u8; 16], //TODO
+    // status: StatusType,
+    // data: [u8; 16], //TODO
 }
 
 impl Default for BlkReq {
@@ -444,8 +541,8 @@ impl Default for BlkReq {
             type_: ReqType::In,
             reserved: 0,
             sector: 0,
-            data: [0; 16],
-            status: StatusType::OK,
+            // data: [0; 16],
+            // status: StatusType::OK,
         }
     }
 }
@@ -847,8 +944,8 @@ mod tests {
                             type_: ReqType::In,
                             reserved: 0,
                             sector: 42,
-                            data: [0; 16],
-                            status: StatusType::OK,
+                            // data: [0; 16],
+                            // status: StatusType::OK,
                         }
                         .as_bytes()
                     );
@@ -945,8 +1042,8 @@ mod tests {
                             type_: ReqType::Out,
                             reserved: 0,
                             sector: 42,
-                            data: [0; 16],
-                            status: StatusType::OK,
+                            // data: [0; 16],
+                            // status: StatusType::OK,
                         }
                         .as_bytes()
                     );
@@ -1048,8 +1145,8 @@ mod tests {
                             type_: ReqType::Flush,
                             reserved: 0,
                             sector: 0,
-                            data: [0; 16],
-                            status: StatusType::OK,
+                            // data: [0; 16],
+                            // status: StatusType::OK,
                         }
                         .as_bytes()
                     );
@@ -1143,8 +1240,8 @@ mod tests {
                             type_: ReqType::GetId,
                             reserved: 0,
                             sector: 0,
-                            data: [0; 16],
-                            status: StatusType::OK,
+                            // data: [0; 16],
+                            // status: StatusType::OK,
                         }
                         .as_bytes()
                     );

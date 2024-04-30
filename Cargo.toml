@@ -25,3 +25,6 @@ alloc = ["zerocopy/alloc"]
 
 [dev-dependencies]
 zerocopy = { version = "0.7.5", features = ["alloc"] }
+
+[workspace]
+members = ["examples/riscv"]
