@@ -55,7 +55,7 @@ pub struct VirtIOBlk<H: Hal, T: Transport> {
     queue: VirtQueue<H, { QUEUE_SIZE as usize }>,
     capacity: u64,
     blk_size: u32,
-    opt_io_size: u32,
+    // opt_io_size: u32,
     max_discard_sectors: u32,
     max_discard_seg: u32,
     max_write_zeroes_sectors: u32,
@@ -90,17 +90,17 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
         let writeback = if negotiated_features.contains(BlkFeature::CONFIG_WCE) {
             unsafe { volread!(config, writeback) }
         } else {
-            0
+            1
         };
 
-        let opt_io_size = if negotiated_features.contains(BlkFeature::TOPOLOGY) {
-            unsafe {
-                let topology = volread!(config, topology);
-                topology.opt_io_size
-            }
-        } else {
-            8
-        };
+        // let opt_io_size = if negotiated_features.contains(BlkFeature::TOPOLOGY) {
+        //     unsafe {
+        //         let topology = volread!(config, topology);
+        //         topology.opt_io_size
+        //     }
+        // } else {
+        //     8
+        // };
 
         let max_discard_sectors = if negotiated_features.contains(BlkFeature::DISCARD) {
             unsafe { volread!(config, max_discard_sectors) }
@@ -157,7 +157,7 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
             queue,
             capacity,
             blk_size,
-            opt_io_size,
+            // opt_io_size,
             max_discard_sectors,
             max_discard_seg,
             max_write_zeroes_sectors,
@@ -469,7 +469,6 @@ impl<H: Hal, T: Transport> Drop for VirtIOBlk<H, T> {
 
 #[repr(C)]
 struct BlkConfig {
-    /// 512字节扇区的数量
     capacity_low: Volatile<u32>,
     capacity_high: Volatile<u32>,
     size_max: Volatile<u32>,
